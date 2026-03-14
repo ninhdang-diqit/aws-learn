@@ -4,20 +4,34 @@ const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const crypto = require('crypto');
 const path = require('path');
+const {
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('@simplewebauthn/server');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../frontend')));
 
+// RP (Relying Party) settings
+const rpName = 'MFA Example App';
+const rpID = 'localhost';
+const origin = `http://${rpID}:3000`;
 
 // In-memory data store
-const users = {}; // { username: { password, mfaEnabled, mfaSecret } }
+const users = {}; // { username: { id: "uuid", password, mfaEnabled, mfaSecret, currentChallenge, passkeys: [] } }
 const sessions = {}; // { token: username }
 const tempSessions = {}; // { tempToken: username }
 
 // Helper to generate a token
 const generateToken = () => crypto.randomBytes(32).toString('hex');
+// Helper to generate User ID
+const generateUserId = () => crypto.randomBytes(32).toString('base64url');
+
+// --- User Registration & Login ---
 
 // Register
 app.post('/api/register', (req, res) => {
@@ -29,9 +43,12 @@ app.post('/api/register', (req, res) => {
         return res.status(400).json({ error: 'User already exists' });
     }
     users[username] = {
+        id: generateUserId(),
         password, // In a real app, hash this!
         mfaEnabled: false,
-        mfaSecret: null
+        mfaSecret: null,
+        currentChallenge: null,
+        passkeys: []
     };
     res.json({ message: 'User registered successfully' });
 });
@@ -45,19 +62,25 @@ app.post('/api/login', (req, res) => {
         return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    if (user.mfaEnabled) {
-        // Require MFA code
+    if (user.mfaEnabled || user.passkeys.length > 0) {
+        // Require MFA setup verification code (either passkey or TOTP)
         const tempToken = generateToken();
         tempSessions[tempToken] = username;
-        return res.json({ requireMfa: true, tempToken });
+        return res.json({ 
+            requireMfa: true, 
+            tempToken,
+            hasTotp: user.mfaEnabled,
+            hasPasskey: user.passkeys.length > 0
+        });
     } else {
-        // No MFA required yet, but we will force the user to set it up before dashboard
-        // Let's log them in, but they MUST go to MFA setup phase first.
+        // No MFA required yet, but MUST go to MFA setup phase first.
         const token = generateToken();
         sessions[token] = username;
         return res.json({ requireMfa: false, token });
     }
 });
+
+// --- TOTP MFA ---
 
 // Generate MFA Setup
 app.post('/api/mfa/generate', async (req, res) => {
@@ -69,15 +92,13 @@ app.post('/api/mfa/generate', async (req, res) => {
 
     const user = users[username];
     if (user.mfaEnabled) {
-        return res.status(400).json({ error: 'MFA already enabled' });
+        return res.status(400).json({ error: 'TOTP already enabled' });
     }
 
-    // Generate a new secret
     const secret = speakeasy.generateSecret({
         name: `MFA Example App (${username})`
     });
 
-    // Save secret temporarily (or overwrite existing pending secret)
     user.mfaSecret = secret.base32;
 
     try {
@@ -91,7 +112,7 @@ app.post('/api/mfa/generate', async (req, res) => {
     }
 });
 
-// Verify and Enable MFA OR Verify during Login
+// Verify TOTP MFA (Initial Setup or Login)
 app.post('/api/mfa/verify', (req, res) => {
     const { token, tempToken, code } = req.body;
     
@@ -101,11 +122,13 @@ app.post('/api/mfa/verify', (req, res) => {
         if (!username) return res.status(401).json({ error: 'Invalid or expired temporary session' });
 
         const user = users[username];
+        if (!user.mfaEnabled) return res.status(400).json({ error: 'TOTP not enabled' });
+        
         const verified = speakeasy.totp.verify({
             secret: user.mfaSecret,
             encoding: 'base32',
             token: code,
-            window: 1 // Allow 1 step before or after
+            window: 1
         });
 
         if (verified) {
@@ -124,7 +147,6 @@ app.post('/api/mfa/verify', (req, res) => {
         if (!username) return res.status(401).json({ error: 'Unauthorized' });
 
         const user = users[username];
-        
         const verified = speakeasy.totp.verify({
             secret: user.mfaSecret,
             encoding: 'base32',
@@ -134,7 +156,7 @@ app.post('/api/mfa/verify', (req, res) => {
 
         if (verified) {
             user.mfaEnabled = true;
-            return res.json({ message: 'MFA enabled successfully' });
+            return res.json({ message: 'TOTP MFA enabled successfully' });
         } else {
             return res.status(400).json({ error: 'Invalid MFA code' });
         }
@@ -143,9 +165,167 @@ app.post('/api/mfa/verify', (req, res) => {
     return res.status(400).json({ error: 'Provide token or tempToken' });
 });
 
-// Dashboard
+// --- Passkeys / WebAuthn ---
+
+// Generate Registration Options (Setup Phase)
+app.post('/api/passkey/generate-registration-options', (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+
+    const token = authHeader.split(' ')[1];
+    const username = sessions[token];
+
+    if (!username) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = users[username];
+
+    const options = generateRegistrationOptions({
+        rpName,
+        rpID,
+        userID: user.id,
+        userName: username,
+        attestationType: 'none',
+        excludeCredentials: user.passkeys.map(passkey => ({
+            id: passkey.credentialID,
+            type: 'public-key',
+            transports: passkey.transports,
+        })),
+        authenticatorSelection: {
+            residentKey: 'preferred',
+            userVerification: 'preferred',
+            authenticatorAttachment: 'platform',
+        },
+    });
+
+    user.currentChallenge = options.challenge;
+    res.json(options);
+});
+
+// Verify Registration Response (Setup Phase)
+app.post('/api/passkey/verify-registration', async (req, res) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
+
+    const token = authHeader.split(' ')[1];
+    const username = sessions[token];
+    if (!username) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = users[username];
+    const body = req.body;
+
+    let verification;
+    try {
+        verification = await verifyRegistrationResponse({
+            response: body,
+            expectedChallenge: user.currentChallenge,
+            expectedOrigin: origin,
+            expectedRPID: rpID,
+        });
+    } catch (error) {
+        console.error(error);
+        return res.status(400).json({ error: error.message });
+    }
+
+    const { verified, registrationInfo } = verification;
+    
+    if (verified && registrationInfo) {
+        const { credentialPublicKey, credentialID, counter } = registrationInfo;
+
+        const existingPasskey = user.passkeys.find(passkey =>
+            passkey.credentialID.toString() === credentialID.toString()
+        );
+
+        if (!existingPasskey) {
+            user.passkeys.push({
+                credentialID,
+                credentialPublicKey,
+                counter,
+                transports: body.response.transports || [],
+            });
+        }
+        res.json({ verified: true });
+    } else {
+        res.status(400).json({ error: 'Verification failed' });
+    }
+});
+
+// Generate Authentication Options (Login Phase)
+app.post('/api/passkey/generate-authentication-options', (req, res) => {
+    const { tempToken } = req.body;
+    const username = tempSessions[tempToken];
+    
+    if (!username) {
+        return res.status(401).json({ error: 'Invalid or expired temporary session' });
+    }
+    
+    const user = users[username];
+
+    const options = generateAuthenticationOptions({
+        rpID,
+        allowCredentials: user.passkeys.map(passkey => ({
+            id: passkey.credentialID,
+            type: 'public-key',
+            transports: passkey.transports,
+        })),
+        userVerification: 'preferred',
+    });
+
+    user.currentChallenge = options.challenge;
+    
+    res.json(options);
+});
+
+// Verify Authentication Response (Login Phase)
+app.post('/api/passkey/verify-authentication', async (req, res) => {
+    const { tempToken, response } = req.body;
+    const username = tempSessions[tempToken];
+
+    if (!username || !response) {
+        return res.status(401).json({ error: 'Invalid session or missing response' });
+    }
+    
+    const user = users[username];
+    const passkey = user.passkeys.find(p => p.credentialID.toString('base64url') === response.id);
+    if (!passkey) {
+        return res.status(400).json({ error: 'Could not find passkey for user' });
+    }
+
+    let verification;
+    try {
+        verification = await verifyAuthenticationResponse({
+            response,
+            expectedChallenge: user.currentChallenge,
+            expectedOrigin: origin,
+            expectedRPID: rpID,
+            authenticator: {
+                credentialPublicKey: passkey.credentialPublicKey,
+                credentialID: passkey.credentialID,
+                counter: passkey.counter,
+            },
+        });
+    } catch (error) {
+        console.error(error);
+        return res.status(400).json({ error: error.message });
+    }
+
+    const { verified, authenticationInfo } = verification;
+    
+    if (verified) {
+        passkey.counter = authenticationInfo.newCounter;
+        
+        delete tempSessions[tempToken];
+        const token = generateToken();
+        sessions[token] = username;
+        
+        res.json({ verified: true, token });
+    } else {
+        res.status(400).json({ error: 'Authentication failed' });
+    }
+});
+
+// --- Dashboard & User Status ---
+
 app.get('/api/dashboard', (req, res) => {
-    // Get token from Authorization header (Bearer <token>)
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -157,8 +337,8 @@ app.get('/api/dashboard', (req, res) => {
     }
 
     const user = users[username];
-    if (!user.mfaEnabled) {
-        return res.status(403).json({ error: 'MFA not enabled. Must enable MFA to view dashboard.' });
+    if (!user.mfaEnabled && user.passkeys.length === 0) {
+        return res.status(403).json({ error: 'MFA not configured. Must enable TOTP or Passkey to view dashboard.' });
     }
 
     res.json({ message: `Hello ${username}, welcome to the secure dashboard!` });
@@ -176,7 +356,11 @@ app.get('/api/me', (req, res) => {
     }
 
     const user = users[username];
-    res.json({ username, mfaEnabled: user.mfaEnabled });
+    res.json({ 
+        username, 
+        mfaEnabled: user.mfaEnabled,
+        passkeysEnabled: user.passkeys.length > 0
+    });
 });
 
 const PORT = 3000;
