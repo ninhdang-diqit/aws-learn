@@ -1,0 +1,7 @@
+{
+  "name": "lambda5-eventbridge-time",
+  "version": "1.0.0",
+  "description": "Lambda 5 triggered by EventBridge; logs trigger time",
+  "main": "index.js",
+  "type": "commonjs"
+}

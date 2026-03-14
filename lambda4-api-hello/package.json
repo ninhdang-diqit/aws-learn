@@ -1,0 +1,7 @@
+{
+  "name": "lambda4-api-hello",
+  "version": "1.0.0",
+  "description": "Lambda API: GET hello world and POST hello + value",
+  "main": "index.js",
+  "type": "commonjs"
+}
