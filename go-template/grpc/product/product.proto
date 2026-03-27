@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package product;
+
+option go_package = "go-template/grpc/product";
+
+service ProductService {
+  rpc GetProduct (GetProductRequest) returns (GetProductResponse) {}
+}
+
+message GetProductRequest {
+  uint32 id = 1;
+}
+
+message GetProductResponse {
+  uint32 id = 1;
+  string sku = 2;
+  string name = 3;
+  double price = 4;
+  int32 stock = 5;
+}

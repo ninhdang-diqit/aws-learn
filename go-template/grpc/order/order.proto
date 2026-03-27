@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package order;
+
+option go_package = "go-template/grpc/order";
+
+service OrderService {
+  rpc GetOrder (GetOrderRequest) returns (GetOrderResponse) {}
+}
+
+message GetOrderRequest {
+  uint32 id = 1;
+}
+
+message GetOrderResponse {
+  uint32 id = 1;
+  string user_id = 2;
+  string item_name = 3;
+  double amount = 4;
+  string status = 5;
+}

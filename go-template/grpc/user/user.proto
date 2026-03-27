@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package user;
+
+option go_package = "go-template/grpc/user";
+
+service UserService {
+  rpc GetUser (GetUserRequest) returns (GetUserResponse) {}
+}
+
+message GetUserRequest {
+  uint32 id = 1;
+}
+
+message GetUserResponse {
+  uint32 id = 1;
+  string email = 2;
+  string name = 3;
+}
