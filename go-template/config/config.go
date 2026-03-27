@@ -16,6 +16,8 @@ type Config struct {
 	RabbitMQURL       string `envconfig:"RABBITMQ_URL" default:"amqp://guest:guest@localhost:5672/"`
 	GRPCPort          string `envconfig:"GRPC_PORT" default:":50051"`
 	GinPort           string `envconfig:"GIN_PORT" default:":8080"`
+	JWTSecret         string `envconfig:"JWT_SECRET" default:"your-secret-key"`
+	JWTExpirationHours int   `envconfig:"JWT_EXPIRATION_HOURS" default:"24"`
 }
 
 func LoadConfig() (*Config, error) {

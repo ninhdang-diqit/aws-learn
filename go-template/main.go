@@ -43,7 +43,7 @@ func main() {
 
 	// Start Gin HTTP Server
 	log.Printf("Starting Gin server on %s...", cfg.GinPort)
-	r := api.SetupRouter()
+	r := api.SetupRouter(cfg)
 	if err := r.Run(cfg.GinPort); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
