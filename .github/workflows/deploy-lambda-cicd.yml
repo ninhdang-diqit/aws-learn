@@ -1,0 +1,56 @@
+name: Deploy Lambda CICD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'lambda-cicd/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Set commit SHA
+      - name: Set commit SHA
+        run: echo "COMMIT_SHA=${GITHUB_SHA}" >> $GITHUB_ENV
+
+      # 3. Zip code (for lambda-cicd)
+      - name: Zip Lambda
+        run: |
+          cd lambda-cicd
+          zip -r ../function.zip . -x "*.git*" "node_modules/*"
+          echo "Zip success!"
+          echo "Hash: ${{ env.COMMIT_SHA }}"
+
+      # 4. Configure AWS
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          region: ${{ secrets.AWS_REGION }}
+
+      # 5. Upload to S3 (commit-based)
+      - name: Upload to S3
+        run: |
+          aws s3 cp function.zip s3://${{ secrets.S3_BUCKET }}/lambda-cicd/${{ env.COMMIT_SHA }}.zip
+
+      # 6. Update Lambda
+      - name: Update Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ secrets.LAMBDA_CICD_FUNCTION_NAME }} \
+            --s3-bucket ${{ secrets.S3_BUCKET }} \
+            --s3-key lambda-cicd/${{ env.COMMIT_SHA }}.zip \
+            --publish
+
+      # 7. (Optional) Save artifact info
+      - name: Output version
+        run: |
+          echo "Deployed commit: ${COMMIT_SHA}"

@@ -1,0 +1,7 @@
+{
+  "name": "lambda-cicd",
+  "version": "1.0.0",
+  "description": "Hello World with CI/CD",
+  "main": "index.js",
+  "type": "commonjs"
+}
